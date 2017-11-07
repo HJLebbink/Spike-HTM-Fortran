@@ -1,0 +1,600 @@
+!  htm_network_old.f90 
+
+!=====================================================
+module htm_network_old
+    use, intrinsic :: ISO_FORTRAN_ENV, only: INT8, INT16, INT32, INT64, REAL32, REAL64
+    use IFPORT, only: IRAND, RAND
+ 
+    implicit none
+
+        !=====================================================
+        enum, bind(C)
+            enumerator :: ACTIVE_STATE = 0
+            enumerator :: LEARN_STATE = 1
+        end enum
+        !=====================================================
+    
+        character(len=*),   parameter :: input_filename         = 'H:/Dropbox/Sc/GitHub/htm.java-examples/bin/rec-center-hourly.csv'
+
+        !=====================================================
+        ! type constants
+        integer(INT32),     parameter :: COLUMN_T               = INT32
+        integer(INT32),     parameter :: CELL_T                 = INT32
+        
+        integer(INT32),     parameter :: N_SENSORS              = 100
+        
+        !=====================================================
+        ! Spatial Pooler Parameters
+        
+        !defaultSpatialParams.put(KEY.INPUT_DIMENSIONS, new int[]{64});
+        !defaultSpatialParams.put(KEY.POTENTIAL_RADIUS, 16);
+        
+        !defaultSpatialParams.put(KEY.INHIBITION_RADIUS, 0);
+        !defaultSpatialParams.put(KEY.LOCAL_AREA_DENSITY, -1.0);
+        
+        !defaultSpatialParams.put(KEY.SYN_PERM_BELOW_STIMULUS_INC, 0.01);
+        !defaultSpatialParams.put(KEY.SYN_PERM_TRIM_THRESHOLD, 0.5);
+        !defaultSpatialParams.put(KEY.MIN_PCT_OVERLAP_DUTY_CYCLE, 0.001);
+        !defaultSpatialParams.put(KEY.MIN_PCT_ACTIVE_DUTY_CYCLE, 0.001);
+
+        ! The period used to calculate duty cycles. Higher values make it take longer to respond to changes in
+        ! boost or synPerConnectedCell. Shorter values make it more unstable and likely to oscillate.
+        !defaultSpatialParams.put(KEY.DUTY_CYCLE_PERIOD, 1000);
+        
+        
+        ! If true, then during inhibition phase the winning columns are selected as the most active columns from
+        ! the region as a whole. Otherwise, the winning columns are selected with respect to their local neighborhoods.
+        logical(1),         parameter :: GLOBAL_INHIBITION      = .TRUE.
+        
+        integer(INT32),     parameter :: COLUMN_DIM_1           = 2048
+        integer(INT32),     parameter :: N_CELLS_PER_COLUMN     = 32     ! number of cell in a column
+        integer(INT32),     parameter :: NUM_ACTIVE_COLUMNS_PER_INH_AREA = 40    ! number of columns that end up begin active within its inhibition radius
+
+        ! This is a number specifying the minimum number of synapses that must be on in order for a columns to
+        ! turn ON. The purpose of this is to prevent noise input from activating columns. Specified as a percent
+        ! of a fully grown synapse.
+        !defaultSpatialParams.put(KEY.STIMULUS_THRESHOLD, 0.0);
+        
+        ! The percent of the inputs, within a column's potential radius, that a column can be connected to.
+        ! If set to 1, the column will be connected to every input within its potential radius. This parameter is
+        ! used to give each column a unique potential pool when a large potentialRadius causes overlap between the
+        ! columns. 
+        real(REAL32),       parameter :: POTENTIAL_PCT          = 0.8
+
+        ! Any synapse whose permanence value is above the connected threshold is a "connected synapse", meaning it can contribute to the cell's firing.
+        real(REAL32),       parameter :: SYN_PERM_CONNECTED     = 0.1
+
+        ! The amount by which an active synapse is incremented in each round. Specified as a percent of a fully grown synapse.
+        real(REAL32),       parameter :: SYN_PERM_ACTIVE_INC    = 0.0001
+
+        ! The amount by which an inactive synapse is decremented in each round. Specified as a percent of a fully grown synapse.
+        real(REAL32),       parameter :: SYN_PERM_INACTIVE_DEC  = 0.0005
+
+        ! The maximum overlap boost factor. Each column's overlap gets multiplied by a boost factor
+        ! before it gets considered for inhibition. The actual boost factor for a column is number
+        ! between 1.0 and maxBoost.
+        real(REAL32),       parameter :: MAX_BOOST              = 1.0
+
+        !=====================================================
+        ! Temporal Memory Parameters
+        !defaultTemporalParams.put(KEY.COLUMN_DIMENSIONS, new int[]{2048});
+        !defaultTemporalParams.put(KEY.CELLS_PER_COLUMN, 32);
+        
+        !defaultTemporalParams.put(KEY.LEARNING_RADIUS, 2048);
+        
+        ! The maximum number of synapses added to a segment during learning.
+        !defaultTemporalParams.put(KEY.MAX_NEW_SYNAPSE_COUNT, 20);
+        
+        ! Amount by which active permanences of synapses of previously predicted but inactive segments are decremented.
+        !defaultTemporalParams.put(KEY.PREDICTED_SEGMENT_DECREMENT, 0.0);
+
+        integer(INT32),     parameter :: MAX_NEW_SYNAPSE_COUNT  = 20
+        
+        ! Amount by which permanence of synapses are incremented during learning.
+        real(REAL32),       parameter :: PERMANENCE_INCREMENT   = 0.1
+        
+        ! Amount by which permanences of synapses are decremented during learning.
+        real(REAL32),       parameter :: PERMANENCE_DECREMENT   = 0.1
+        
+        ! If the number of synapses active on a segment is at least this threshold, it is selected as the best matching cell in a bursting column.
+        integer(INT32),     parameter :: MIN_THRESHOLD          = 9
+
+        ! If the number of active connected synapses on a segment is at least this threshold, the segment is said to be active.
+        ! minimum overlap of connected synapses with active inputs 
+        integer(INT32),     parameter :: SEGMENT_ACTIVATION_THRESHOLD   = 12
+
+        ! Initial permanence of a new synapse
+        real(REAL32),       parameter :: INITIAL_PERMANENCE         = 0.21
+
+        ! if the permanence value for a synapse is greater than this value, it is said to be connected
+        real(REAL32),       parameter :: CONNECTED_PERMANENCE       = 0.5
+    
+        !=====================================================
+        
+        integer(INT32),     parameter :: N_DD_SYNAPSES          = 10    ! number of potential synapses per distal dendrite
+        integer(INT32),     parameter :: N_PD_SYNAPSES          = 10    ! number of potential synapses per proximal dendrite
+        
+        integer(INT32),     parameter :: N_DD_SEGMENTS_MAX      = 10     ! max number of distal dendrite segments in a cell
+        
+        integer(INT32),     parameter :: N_COLUMNS              = COLUMN_DIM_1    ! number columns in a region (layer)
+        integer(INT32),     parameter :: N_CELLS                = N_CELLS_PER_COLUMN * N_COLUMNS    ! number of cell in a region (region is a layer)
+        
+    
+        logical(1)      :: global_sensor_data(N_SENSORS)       = .FALSE.
+        logical(1)      :: global_active_column(N_COLUMNS)     = .FALSE.
+        real(REAL32)    :: global_boost(N_COLUMNS)             = 1
+        integer(INT32)  :: global_overlap(N_COLUMNS)           = 0
+        
+        integer(INT32)  :: global_neighbors(100, N_COLUMNS)    = -1
+        integer(INT32)  :: global_neighbors_size(N_COLUMNS)    = 0
+        
+        real(REAL32)    :: pd_synapse_permanance(N_PD_SYNAPSES, N_CELLS_PER_COLUMN, N_COLUMNS) = -1
+        integer(INT32)  :: pd_synapse_origin(    N_PD_SYNAPSES, N_CELLS_PER_COLUMN, N_COLUMNS) = -1
+        
+        logical(1)      :: global_predictive_state_curr(    N_CELLS_PER_COLUMN, N_COLUMNS)  = .FALSE.
+        logical(1)      :: global_predictive_state_prev(    N_CELLS_PER_COLUMN, N_COLUMNS)  = .FALSE.
+
+        logical(1)      :: global_active_state_curr(        N_CELLS_PER_COLUMN, N_COLUMNS)  = .FALSE.
+        logical(1)      :: global_active_state_prev(        N_CELLS_PER_COLUMN, N_COLUMNS)  = .FALSE.
+
+        logical(1)      :: global_learn_state_curr(         N_CELLS_PER_COLUMN, N_COLUMNS)  = .FALSE.
+        logical(1)      :: global_learn_state_prev(         N_CELLS_PER_COLUMN, N_COLUMNS)  = .FALSE.
+    
+        integer(INT8)   :: global_dd_segments_used(         N_CELLS_PER_COLUMN, N_COLUMNS) = 0
+
+        type cell_position_t
+            integer(CELL_T)     :: cell_
+            integer(COLUMN_T)   :: column_
+        end type cell_position_t
+
+        real(REAL32)          :: dd_synapse_permanance(N_DD_SYNAPSES, N_DD_SEGMENTS_MAX, N_CELLS_PER_COLUMN, N_COLUMNS) = -1
+        type(cell_position_t) :: dd_synapse_origin(    N_DD_SYNAPSES, N_DD_SEGMENTS_MAX, N_CELLS_PER_COLUMN, N_COLUMNS)
+        
+        integer(INT16)  :: global_segment_activity_curr(N_DD_SEGMENTS_MAX, N_CELLS_PER_COLUMN, N_COLUMNS) = 0
+        integer(INT16)  :: global_segment_activity_prev(N_DD_SEGMENTS_MAX, N_CELLS_PER_COLUMN, N_COLUMNS) = 0
+        
+        logical(1)      :: global_sequence_segment_curr(N_DD_SEGMENTS_MAX, N_CELLS_PER_COLUMN, N_COLUMNS) = .FALSE.
+        logical(1)      :: global_sequence_segment_prev(N_DD_SEGMENTS_MAX, N_CELLS_PER_COLUMN, N_COLUMNS) = .FALSE.
+        
+        type segment_update_t
+            logical(1)              :: valid_                   = .FALSE.
+            logical(1)              :: sequence_segment_        = .FALSE.
+            integer(INT32)          :: segment_index_           = 1
+            type(cell_position_t)   :: dd_synapse_origin_(N_DD_SYNAPSES)
+        end type segment_update_t
+        
+        type (segment_update_t) :: segment_update_list(N_CELLS_PER_COLUMN, N_COLUMNS)
+
+        logical(1)      :: trace_on     = .TRUE.
+        integer(INT32)  :: trace_cell   = 1
+        integer(INT32)  :: trace_column = 1
+        
+        
+    contains
+    
+!=====================================================
+    subroutine encode_input(filename)
+        character(len=*), intent(in) :: filename
+        print '("INFO: encoding input: filename ",A)', TRIM(filename)
+    
+    end subroutine
+!=====================================================
+    subroutine print_mem_usage()
+        integer(INT64) :: mem_usage
+        mem_usage = N_CELLS * N_DD_SEGMENTS_MAX * 40 !TODO
+        print '("INFO: memory usage:",i," bytes = ",f5.10," GB")', mem_usage, FLOAT(mem_usage)/(1024**3)
+    end subroutine
+!=====================================================
+    subroutine run()
+        integer(INT32) :: t
+        
+        call encode_input(input_filename)
+        
+        do t = 1,2
+            call advance_time(t)
+            call spatial_pooling()
+            call temporal_pooling()
+        end do
+    end subroutine run
+!=====================================================
+    subroutine advance_time(t)
+        integer(INT32), intent(in) :: t
+        print '("INFO: advance_time: ",i)', t
+    
+        global_predictive_state_prev    = global_predictive_state_curr
+        global_active_state_prev        = global_active_state_curr
+        global_learn_state_prev         = global_learn_state_curr
+        global_segment_activity_prev    = global_segment_activity_curr
+        global_sequence_segment_prev    = global_sequence_segment_curr
+        
+        global_active_state_curr        = .FALSE.
+        global_learn_state_curr         = .FALSE.
+
+    end subroutine advance_time
+!=====================================================
+    subroutine spatial_pooling()
+        
+        calc_overlap: block
+            integer(INT32) :: column_i, cell_i, synapse_i, overlap
+            
+            do column_i = 1,N_COLUMNS
+                overlap = 0
+                do cell_i = 1,N_CELLS_PER_COLUMN
+                    do synapse_i = 1,N_PD_SYNAPSES
+                        if (pd_synapse_permanance(synapse_i, cell_i, column_i) > CONNECTED_PERMANENCE) then
+                            if (global_sensor_data(pd_synapse_origin(synapse_i, cell_i, column_i))) then
+                                overlap = overlap + 1
+                            end if
+                        end if
+                    end do
+                end do
+
+                if (overlap < MIN_THRESHOLD) then
+                    global_overlap(column_i) = 0
+                else 
+                    global_overlap(column_i) = overlap * global_boost(column_i)
+                end if
+            end do
+        end block calc_overlap
+        
+        inhibition: block
+            integer(INT32) :: column_i
+            
+            do column_i = 1,N_COLUMNS
+                if (global_overlap(column_i) > 0) then
+                    if (has_column_most_overlap(column_i, MIN_THRESHOLD)) then
+                        global_active_column(column_i) = .TRUE.
+                    end if
+                end if
+            end do
+        end block inhibition
+        
+        learning: block
+            integer(INT32) :: column_i, cell_i, synapse_i
+            real(REAL32)   :: permanance
+            
+            do column_i = 1,N_COLUMNS
+                if (global_active_column(column_i)) then
+                    do cell_i = 1,N_CELLS_PER_COLUMN
+                        do synapse_i = 1,N_PD_SYNAPSES
+
+                            permanance = pd_synapse_permanance(synapse_i, cell_i, column_i)
+                            if (permanance > CONNECTED_PERMANENCE) then
+                                permanance = permanance + PERMANENCE_INCREMENT
+                                permanance = MAX(1.0, permanance)
+                            else
+                                permanance = permanance - PERMANENCE_DECREMENT
+                                permanance = MIN(0.0, permanance)
+                            end if
+                            pd_synapse_permanance(synapse_i, cell_i, column_i) = permanance
+                        end do
+                    end do
+                end if
+            end do
+            do column_i = 1,N_COLUMNS
+                ! TODO: 1] update network_boost(column_i)
+                ! TODO: 2] increase permanence if input overlap is small
+            end do
+            
+            ! TODO: recompute the inhibition radius
+        end block learning
+    end subroutine spatial_pooling
+!=====================================================
+    subroutine temporal_pooling()
+        
+        update_active_state: block
+            logical(1) :: bottum_up_predicted, chosen
+            integer(INT32) :: column_i, cell_i, segment_i
+            
+            ! 1] compute the active state of each cell
+            do column_i = 1,N_COLUMNS
+                
+                call update_segment_activity(column_i)
+                
+                if (global_active_column(column_i)) then   ! the column is active
+                
+                    bottum_up_predicted = .FALSE.
+                    chosen              = .FALSE.
+                    ! 1.1
+                    do cell_i = 1,N_CELLS_PER_COLUMN
+                        if (global_predictive_state_prev(cell_i, column_i)) then    ! this cell was predicted in the previous time step
+                            
+                            segment_i = get_active_segment_prev(cell_i, column_i, ACTIVE_STATE)    ! 
+                            if (global_sequence_segment_prev(segment_i, cell_i, column_i)) then ! squence_segment indicates whether the segment predicts feed-forward input on the next time step
+                                bottum_up_predicted = .TRUE.
+                                global_active_state_curr(cell_i, column_i) = .TRUE.
+                                
+                                if (is_segment_active_prev(segment_i, cell_i, column_i, LEARN_STATE)) then
+                                    chosen = .TRUE.
+                                    global_learn_state_curr(cell_i, column_i) = .TRUE. ! only one cell per column has learn state turned on, this cell matches the input best
+                                end if
+                            end if
+                        end if
+                    end do
+                    ! 1.2
+                    if (.NOT.bottum_up_predicted) then  ! no cells had predicted that the column would be active
+                        global_active_state_curr(:, column_i) = .TRUE.  ! if no cells are in a predictive state, activate all cells in the column
+                    end if
+                    ! 1.3
+                    block
+                        integer(INT32) :: winner_cell, best_segment, segment_match
+                        
+                        if (.NOT.chosen) then
+                            call get_best_matching_cell_and_segment_prev(column_i, winner_cell, best_segment, segment_match)
+                            global_learn_state_curr(winner_cell, column_i) = .TRUE.
+
+                            if (best_segment == -1) then
+                                ! best_segment = create_distal_dendrite_segment()
+                            end if
+
+                            if (best_segment /= -1) then
+                                
+                                ! learning_segment(best_segment, winner_cell, collumn_i) = .TRUE.
+
+                                !print '("INFO: a new segment is added to cell ",i)', best_cell
+                            end if
+                        end if
+                    end block
+                end if
+            end do
+        end block update_active_state
+        
+        update_predictive_state: block
+            integer(INT32) :: column_i, cell_i, segment_i
+
+            ! 2] compute the predictive state for each cell
+            
+            do column_i = 1,N_COLUMNS
+                do cell_i = 1,N_CELLS_PER_COLUMN
+!                    if (.NOT.network_active_state(cell_i, column_i)) then
+                        do segment_i = 1,global_dd_segments_used(cell_i, column_i)
+                            if (is_segment_active_curr(segment_i, cell_i, column_i, ACTIVE_STATE)) then
+                                global_predictive_state_curr(cell_i, column_i) = .TRUE.
+                                
+                                !TODO
+                                !1] reinforce the currently active segment
+                                !segment_update_list(cell_i, column_i) = 
+                                
+                                
+                                !2] reinforce the segment that could have predicted this activation in the previous time step.
+                            end if
+                        end do
+!                    end if
+                end do
+            end do
+        end block update_predictive_state
+        
+        update_synapses: block
+            integer(INT32) :: column_i, cell_i
+
+            do column_i = 1,N_COLUMNS
+                do cell_i = 1,N_CELLS_PER_COLUMN
+                    if (global_learn_state_curr(cell_i, column_i)) then
+                        call adapt_segment(segment_update_list(cell_i, column_i), .TRUE., cell_i, column_i)
+                    else if (.NOT.global_predictive_state_curr(cell_i, column_i).AND.(global_predictive_state_prev(cell_i, column_i))) then
+                        call adapt_segment(segment_update_list(cell_i, column_i), .FALSE., cell_i, column_i)
+                    end if
+                end do
+            end do
+        end block update_synapses
+        
+    end subroutine temporal_pooling
+!=====================================================
+    subroutine adapt_segment(segment_update, positive_reinforcement, cell, column)
+        type(segment_update_t), intent(in) :: segment_update
+        logical(1),             intent(in) :: positive_reinforcement
+        integer(INT32),         intent(in) :: cell, column
+        ! local variables
+        integer(INT32) :: segment_i
+        
+        if (segment_update % valid_) then
+            if (segment_update % sequence_segment_ == -1) then ! new segment
+                segment_i = global_dd_segments_used(cell, column)
+                if (segment_i < N_DD_SEGMENTS_MAX) then
+                    segment_i = segment_i + 1
+                    global_dd_segments_used(cell, column) = segment_i
+                    
+                    !TODO make synapses to cells with learn state on
+
+                else
+                     stop 'too many segments'
+                end if
+            else
+                segment_i = segment_update % sequence_segment_
+                if (positive_reinforcement) then
+                    !TODO
+                else
+                    
+                end if
+            end if
+            global_sequence_segment_curr(segment_i, cell, column) = segment_update % sequence_segment_
+        else
+            stop 'segment update is not valid'
+        end if
+    end subroutine
+!=====================================================
+    function has_column_most_overlap(column, k) result(r)
+        integer(INT32), intent(in) :: column, k
+        logical(1) :: r
+        ! local variables
+        integer(INT32) :: n_columns_with_more_overlap, column_i, overlap_target
+        
+        overlap_target = global_overlap(column)
+        n_columns_with_more_overlap = 0
+        
+        if (GLOBAL_INHIBITION) then ! this can be done faster with caching
+            do column_i = 1,N_COLUMNS
+                if (global_overlap(column_i) > overlap_target) then
+                    n_columns_with_more_overlap = n_columns_with_more_overlap + 1
+                end if
+            end do
+        else
+            !1] retrieve the columns in the neigborhood of column_i
+            stop 'not implemented yet'
+        end if
+        
+        r = (n_columns_with_more_overlap < k)
+    end function has_column_most_overlap
+!=====================================================
+    subroutine get_best_matching_segment_prev(cell, column, best_segment, segment_match)
+        integer(INT32), intent(in)  :: cell, column
+        integer(INT32), intent(out) :: best_segment, segment_match
+        ! local variables
+        integer(INT32) :: segment_i, n_active_synapses, n_active_synapses_selected, segment_selected
+        
+        n_active_synapses_selected = global_segment_activity_prev(1, cell, column)
+        segment_selected = 1
+        
+        do segment_i = 2, global_dd_segments_used(cell, column) 
+            n_active_synapses = global_segment_activity_prev(segment_i, cell, column)
+            if (n_active_synapses > n_active_synapses_selected) then
+                n_active_synapses_selected = n_active_synapses
+                segment_selected = segment_i
+            end if
+        end do
+        
+        segment_match = n_active_synapses_selected
+        if (n_active_synapses_selected > SEGMENT_ACTIVATION_THRESHOLD) then
+            best_segment = segment_selected
+        else
+            best_segment = -1
+        end if
+    end subroutine get_best_matching_segment_prev
+!=====================================================
+    subroutine get_best_matching_cell_and_segment_prev(column, best_cell, best_segment, segment_match)
+        integer(INT32), intent(in) :: column
+        integer(INT32), intent(out) :: best_cell, best_segment, segment_match
+        ! local variables
+        integer(INT32) :: cell_i, selected_cell, best_segment_tmp, segment_match_tmp
+        
+        call get_best_matching_segment_prev(1, column, best_segment, segment_match)
+        selected_cell = 1
+        
+        ! return the cell with the best matching segment
+        do cell_i = 2,N_CELLS_PER_COLUMN
+            call get_best_matching_segment_prev(cell_i, column, best_segment_tmp, segment_match_tmp)
+            if (segment_match > segment_match_tmp) then
+                segment_match = segment_match_tmp
+                best_segment  = best_segment_tmp
+                best_cell     = cell_i
+            end if
+        end do
+        
+        if (best_segment == -1) then
+            ! if no cell has a matching segment, then return the cell with the fewest number of segments
+            segment_match = global_dd_segments_used(1, column) ! small bug here, network_dd_segments_used may have been increased in the previous time step, 
+            selected_cell = 1
+
+            do cell_i = 2,N_CELLS_PER_COLUMN
+                segment_match_tmp = global_dd_segments_used(cell_i, column)
+                if (segment_match_tmp < segment_match) then
+                    segment_match = segment_match_tmp
+                    selected_cell = cell_i
+                end if
+            end do
+            segment_match = -1
+        end if
+        
+    end subroutine get_best_matching_cell_and_segment_prev
+!=====================================================
+    subroutine update_segment_activity(column)
+        integer(INT32), intent(in) :: column
+        ! local variables
+        integer(INT32) :: cell_i, segment_i
+
+        global_segment_activity_prev = global_segment_activity_curr
+        
+        do cell_i = 1,N_CELLS_PER_COLUMN
+            do segment_i = 1,global_dd_segments_used(cell_i, column)
+                global_segment_activity_curr(segment_i, cell_i, column) = INT(get_segment_activity_curr(segment_i, cell_i, column), INT16)
+            end do
+        end do
+    end subroutine update_segment_activity
+!=====================================================
+    function is_segment_active_prev(segment, cell, column, state_enum) result(r)
+        integer(INT32), intent(in) :: segment, column, cell
+        integer(INT8),  intent(in) :: state_enum
+        logical(1) :: r
+        
+        r = (global_segment_activity_prev(segment, cell, column) > SEGMENT_ACTIVATION_THRESHOLD)
+        if (state_enum == LEARN_STATE) then
+            r = r.AND.global_learn_state_prev(cell, column)
+        else 
+            r = r.AND.global_active_state_prev(cell, column)
+        end if
+    end function is_segment_active_prev
+!=====================================================
+    function is_segment_active_curr(segment, cell, column, state_enum) result(r)
+        integer(INT32), intent(in) :: segment, column, cell
+        integer(INT8),  intent(in) :: state_enum
+        logical(1) :: r
+        r = (global_segment_activity_curr(segment, cell, column) > SEGMENT_ACTIVATION_THRESHOLD)
+        if (state_enum == LEARN_STATE) then
+            r = r.AND.global_learn_state_curr(cell, column)
+        else 
+            r = r.AND.global_active_state_curr(cell, column)
+        end if
+    end function is_segment_active_curr
+!=====================================================
+! return a segment index that is active. If multiple segments are active, sequence segments are given preference. 
+! Otherwise, segments with the most activity are given preference. Assumes update_segment_activity has been called for the column
+    function get_active_segment_prev(cell, column, state_enum) result(r)
+        integer(INT32), intent(in) :: column, cell
+        integer(INT8),  intent(in) :: state_enum
+        integer(INT32) :: r
+        ! local variable
+        integer(INT32) :: segment_i
+        
+        r = -1
+        
+        do segment_i = 1,global_dd_segments_used(cell, column)
+            if (global_segment_activity_prev(segment_i, cell, column) > SEGMENT_ACTIVATION_THRESHOLD) then
+                ! TODO
+            end if
+        end do
+        r = 0 ! TODO
+    end function get_active_segment_prev
+!=====================================================
+    function get_segment_activity_curr(segment, cell, column) result(r)
+        integer(INT32), intent(in) :: column, cell, segment
+        integer(INT32) :: r
+        ! local variables
+        integer(INT32) :: n_active_incoming_synapses, synapse_i
+        type(cell_position_t) :: cell_pos
+        
+        n_active_incoming_synapses = 0
+        do synapse_i = 1,N_DD_SYNAPSES
+            cell_pos = dd_synapse_origin(synapse_i, segment, cell, column)
+            if (global_active_state_curr(cell_pos % cell_, cell_pos % column_)) then
+                n_active_incoming_synapses = n_active_incoming_synapses + 1
+            end if
+        end do
+        r = n_active_incoming_synapses 
+    end function get_segment_activity_curr
+!=====================================================
+    function rand() result(r)
+        real(REAL64) :: r
+        call RANDOM_NUMBER(r) ! Uniform distribution
+    end function rand
+!=====================================================
+    function rand_int32(min, max) result(r)
+        integer(INT32) :: r
+        integer(INT32), intent(in) :: min, max
+        r = min + (rand() * ((max-min) + 1))
+    end function rand_int32
+!=====================================================
+    subroutine init()
+        integer(INT32) :: cell_i, column_i, synapse_i
+    
+        ! init permanence values
+        do column_i = 1,N_COLUMNS
+            do cell_i = 1,N_CELLS_PER_COLUMN
+                do synapse_i = 1,N_PD_SYNAPSES
+                    pd_synapse_permanance(synapse_i, cell_i, column_i) = rand() ! TODO
+                    pd_synapse_origin(synapse_i, cell_i, column_i) = rand_int32(1, N_SENSORS)
+                end do
+            end do
+        end do
+    end subroutine
+!=====================================================
+end module htm_network_old
